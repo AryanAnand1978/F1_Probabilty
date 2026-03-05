@@ -1,0 +1,31 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color: #ffffff;
+  background-color: #111111;
+  font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: radial-gradient(circle at 20% 20%, #2d2d2d 0%, #111111 55%, #0a0a0a 100%);
+}
+
+.card {
+  @apply rounded-xl bg-f1gray/90 border border-white/10 shadow-card;
+}
+
+.tab-btn {
+  @apply px-4 py-2 rounded-lg text-sm font-semibold border border-white/15 transition;
+}
+
+.tab-btn-active {
+  @apply bg-f1red text-white border-f1red;
+}
+
+.tab-btn-inactive {
+  @apply bg-black/30 text-white/75 hover:bg-black/45;
+}
