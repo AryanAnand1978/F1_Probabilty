@@ -82,5 +82,4 @@ VITE_API_BASE=http://localhost:8000
 ## Notes
 
 - Data is loaded from FastF1 and cached in `backend/cache/`.
-- Analysis includes descriptive stats, random variable analysis, correlation/regression, distributions, and hypothesis testing.
-- Decision rule used in testing: reject H0 if `p-value < 0.05`.
+- Analysis includes descriptive stats, random variable analysis, correlation/regression, distributions, and season comparison.

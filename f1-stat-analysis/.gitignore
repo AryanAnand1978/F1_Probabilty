@@ -5,3 +5,18 @@ build/
 coverage/
 .vscode/
 .DS_Store
+
+# Python cache and virtual environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Tool and package caches
+.cache/
+npm-cache/
+pip-wheel-metadata/
+
+# Project data caches and generated outputs
+backend/cache/
+backend/results/

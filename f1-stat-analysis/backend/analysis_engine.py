@@ -7,9 +7,11 @@ from statistics_module import (
     correlation_regression,
     covariance_between_drivers,
     descriptive_statistics,
-    hypothesis_testing,
+    driver_comparison_summary,
+    lap_trend_analysis,
     probability_distributions,
     random_variable_analysis,
+    team_comparison_summary,
 )
 
 
@@ -52,6 +54,7 @@ class AnalysisEngine:
             raise ValueError(f"Not enough lap data for comparison driver {comparison_driver}.")
 
         lap_numbers = driver_df["LapNumber"].astype(int).tolist()
+        comparison_lap_numbers = comparison_df["LapNumber"].astype(int).tolist()
 
         pit_counts = list(self.data_loader.pit_stops_per_driver(session).values())
         team1_pit_times = self.data_loader.team_pit_stop_times(session, team1)
@@ -60,31 +63,48 @@ class AnalysisEngine:
         dnf_records = self.data_loader.dnf_data(session)
         podium_stats = self.data_loader.season_podium_stats(year, driver)
         failure_intervals = self.data_loader.mechanical_failure_intervals(year, driver)
+        season_comparison = self.data_loader.season_driver_comparison(year, [driver, comparison_driver])
 
-        anova_groups = self._anova_groups(session, limit=6)
+        selected_trend = lap_trend_analysis(lap_numbers, selected_driver_laps)
+        comparison_trend = lap_trend_analysis(comparison_lap_numbers, comparison_laps)
+        selected_clean = selected_trend["cleaned_scatter"]["y"]
+        comparison_clean = comparison_trend["cleaned_scatter"]["y"]
 
-        covariance = covariance_between_drivers(selected_driver_laps, comparison_laps)
+        team1_laps = self._clean_laps(self.data_loader.lap_times_from_df(team1_df))
+        team2_laps = self._clean_laps(self.data_loader.lap_times_from_df(team2_df))
+
+        covariance = covariance_between_drivers(selected_clean, comparison_clean)
 
         descriptive = descriptive_statistics(selected_driver_laps)
         random_variable = random_variable_analysis(
-            selected_driver_laps,
+            selected_clean,
             covariance=covariance,
             comparison_driver=comparison_driver,
         )
-        corr_reg = correlation_regression(lap_numbers, selected_driver_laps)
+        corr_reg = correlation_regression(
+            selected_trend["smoothed_line"]["x"],
+            selected_trend["smoothed_line"]["y"],
+        )
         distributions = probability_distributions(
-            lap_times=selected_driver_laps,
+            lap_times=selected_clean,
             pit_stop_counts=pit_counts,
             podium_count=podium_stats["podiums"],
             total_races=podium_stats["races"],
             failure_intervals=failure_intervals,
         )
-        hypothesis = hypothesis_testing(
-            selected_driver_laps=selected_driver_laps,
-            comparison_driver_laps=comparison_laps,
-            team1_pit_times=team1_pit_times,
-            team2_pit_times=team2_pit_times,
-            anova_groups=anova_groups,
+        driver_comparison = driver_comparison_summary(
+            driver,
+            comparison_driver,
+            selected_clean,
+            comparison_clean,
+        )
+        team_comparison = team_comparison_summary(
+            team1,
+            team2,
+            team1_laps,
+            team2_laps,
+            team1_pit_times,
+            team2_pit_times,
         )
 
         return {
@@ -100,8 +120,14 @@ class AnalysisEngine:
             "descriptive_statistics": descriptive,
             "random_variables": random_variable,
             "correlation_regression": corr_reg,
+            "driver_trends": {
+                "selected_driver": selected_trend,
+                "comparison_driver": comparison_trend,
+                "comparison_summary": driver_comparison,
+            },
+            "team_comparison": team_comparison,
+            "season_comparison": season_comparison,
             "probability_distributions": distributions,
-            "hypothesis_testing": hypothesis,
             "race_context": {
                 "dnf_data": dnf_records,
                 "team1_pit_stop_times": team1_pit_times,
@@ -123,12 +149,6 @@ class AnalysisEngine:
 
         return None
 
-    def _anova_groups(self, session, limit: int = 6) -> dict[str, list[float]]:
-        laps = session.laps.copy()
-        groups: dict[str, list[float]] = {}
-        for driver_code in laps["Driver"].dropna().unique().tolist()[:limit]:
-            driver_df = laps[(laps["Driver"] == driver_code) & laps["LapTime"].notna()].copy()
-            lap_values = driver_df["LapTime"].dt.total_seconds().tolist()
-            if len(lap_values) >= 3:
-                groups[str(driver_code)] = lap_values
-        return groups
+    @staticmethod
+    def _clean_laps(lap_values: list[float], threshold: float = 120.0) -> list[float]:
+        return [lap for lap in lap_values if lap <= threshold]

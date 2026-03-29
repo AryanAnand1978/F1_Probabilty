@@ -98,6 +98,125 @@ class F1DataLoader:
         except Exception:
             return pd.DataFrame()
 
+    @staticmethod
+    def _normalize_nested_df(df: pd.DataFrame) -> pd.DataFrame:
+        if df is None or df.empty:
+            return pd.DataFrame()
+
+        try:
+            normalized = pd.json_normalize(df.to_dict(orient="records"), sep=".")
+            return normalized if not normalized.empty else df.copy()
+        except Exception:
+            return df.copy()
+
+    @staticmethod
+    def _flatten_race_result_content(response: Any) -> pd.DataFrame:
+        content = getattr(response, "content", None)
+        description = getattr(response, "description", None)
+        if content is None:
+            return pd.DataFrame()
+
+        rows: list[dict[str, Any]] = []
+        content_items = content if isinstance(content, list) else [content]
+        description_records: list[dict[str, Any]] = []
+
+        raw_description_items = description if isinstance(description, list) else [description]
+        for desc_item in raw_description_items:
+            desc_df = F1DataLoader._normalize_nested_df(
+                F1DataLoader._ergast_content_to_df(type("Response", (), {"content": desc_item})())
+            )
+            if not desc_df.empty:
+                description_records.extend(desc_df.to_dict(orient="records"))
+            elif isinstance(desc_item, dict):
+                description_records.append(desc_item)
+
+        # FastF1 Ergast responses often split race metadata into `description`
+        # and the result rows into `content`. Stitch them back together so
+        # each result row carries the round and race info.
+        if description_records and len(description_records) == len(content_items):
+            for desc_row, content_item in zip(description_records, content_items):
+                content_df = F1DataLoader._normalize_nested_df(
+                    F1DataLoader._ergast_content_to_df(type("Response", (), {"content": content_item})())
+                )
+                if not content_df.empty:
+                    merged_df = content_df.copy()
+                    for key, value in desc_row.items():
+                        if key not in merged_df.columns:
+                            merged_df[key] = value
+                    rows.extend(merged_df.to_dict(orient="records"))
+                    continue
+
+                if isinstance(content_item, dict):
+                    nested_results = content_item.get("Results") or content_item.get("results") or []
+                    if isinstance(nested_results, list) and nested_results:
+                        for result in nested_results:
+                            if isinstance(result, dict):
+                                rows.append({**desc_row, **result})
+                    else:
+                        rows.append({**desc_row, **content_item})
+                    continue
+
+                if isinstance(content_item, pd.DataFrame):
+                    merged_df = F1DataLoader._normalize_nested_df(content_item)
+                    for key, value in desc_row.items():
+                        if key not in merged_df.columns:
+                            merged_df[key] = value
+                    rows.extend(merged_df.to_dict(orient="records"))
+            if rows:
+                return pd.DataFrame(rows)
+
+        direct_df = F1DataLoader._normalize_nested_df(F1DataLoader._ergast_content_to_df(response))
+        if not direct_df.empty and {"driverCode", "round", "points", "position"}.issubset(direct_df.columns):
+            return direct_df
+
+        if isinstance(content, pd.DataFrame) and {"Results", "results"}.intersection(set(content.columns)):
+            content_items = content.to_dict(orient="records")
+
+        for item in content_items:
+            if isinstance(item, pd.DataFrame):
+                rows.extend(F1DataLoader._normalize_nested_df(item).to_dict(orient="records"))
+                continue
+
+            if not isinstance(item, dict):
+                continue
+
+            nested_results = item.get("Results") or item.get("results") or []
+            base_fields = {
+                key: value
+                for key, value in item.items()
+                if not isinstance(value, (list, dict, pd.DataFrame))
+            }
+
+            if isinstance(nested_results, list) and nested_results:
+                for result in nested_results:
+                    if not isinstance(result, dict):
+                        continue
+
+                    flat_row = base_fields.copy()
+                    driver = result.get("Driver") if isinstance(result.get("Driver"), dict) else {}
+                    flat_row.update(
+                        {
+                            "driverCode": result.get("driverCode") or driver.get("code"),
+                            "position": result.get("position") or result.get("positionText"),
+                            "points": result.get("points", 0),
+                            "status": result.get("status") or result.get("Status"),
+                        }
+                    )
+                    rows.append(flat_row)
+            else:
+                rows.append(base_fields)
+
+        return pd.DataFrame(rows)
+
+    @staticmethod
+    def _resolve_column(df: pd.DataFrame, candidates: list[str]) -> str | None:
+        lower_to_actual = {str(column).lower(): str(column) for column in df.columns}
+        for candidate in candidates:
+            match = lower_to_actual.get(candidate.lower())
+            if match:
+                return match
+        return None
+
     def driver_laps(self, session, driver_code: str) -> pd.DataFrame:
         laps = session.laps.copy()
         driver_df = laps[(laps["Driver"] == driver_code) & laps["LapTime"].notna()].copy()
@@ -142,7 +261,7 @@ class F1DataLoader:
 
     def season_podium_stats(self, year: int, driver_code: str) -> dict[str, int]:
         race_results = self.ergast.get_race_results(season=year, limit=1000)
-        content = self._ergast_content_to_df(race_results)
+        content = self._flatten_race_result_content(race_results)
         if content.empty:
             return {"races": 0, "podiums": 0}
 
@@ -156,7 +275,7 @@ class F1DataLoader:
 
     def mechanical_failure_intervals(self, year: int, driver_code: str) -> list[int]:
         race_results = self.ergast.get_race_results(season=year, limit=1000)
-        content = self._ergast_content_to_df(race_results)
+        content = self._flatten_race_result_content(race_results)
         if content.empty or not {"status", "driverCode", "round"}.issubset(content.columns):
             return []
 
@@ -180,3 +299,69 @@ class F1DataLoader:
     @staticmethod
     def lap_times_from_df(df: pd.DataFrame) -> list[float]:
         return df["LapTime"].dt.total_seconds().tolist() if not df.empty else []
+
+    def season_driver_comparison(self, year: int, driver_codes: list[str]) -> dict[str, Any]:
+        race_results = self.ergast.get_race_results(season=year, limit=1000)
+        content = self._flatten_race_result_content(race_results)
+        if content.empty:
+            return {"rounds": [], "drivers": {}, "interpretation": "No season comparison data available."}
+
+        driver_col = self._resolve_column(content, ["driverCode", "driver.code", "Driver.code", "Driver.driverCode"])
+        round_col = self._resolve_column(content, ["round", "RoundNumber"])
+        points_col = self._resolve_column(content, ["points", "Points"])
+        position_col = self._resolve_column(content, ["position", "positionText", "Position"])
+
+        if not all([driver_col, round_col, points_col, position_col]):
+            return {"rounds": [], "drivers": {}, "interpretation": "Season comparison data is incomplete for this season."}
+
+        normalized = content.rename(
+            columns={
+                driver_col: "driverCode",
+                round_col: "round",
+                points_col: "points",
+                position_col: "position",
+            }
+        ).copy()
+
+        normalized = normalized[normalized["driverCode"].notna() & normalized["round"].notna()].copy()
+        if normalized.empty:
+            return {"rounds": [], "drivers": {}, "interpretation": "No season comparison data available."}
+
+        rounds = sorted(normalized["round"].dropna().astype(int).unique().tolist())
+        schedule = {race["round"]: race["race_name"] for race in self.races_for_year(year)}
+
+        drivers: dict[str, Any] = {}
+        for driver_code in driver_codes:
+            driver_rows = normalized[normalized["driverCode"].astype(str) == str(driver_code)].copy()
+            if driver_rows.empty:
+                drivers[driver_code] = {
+                    "race_names": [],
+                    "rounds": [],
+                    "points_by_round": [],
+                    "cumulative_points": [],
+                    "finishing_positions": [],
+                    "total_points": 0.0,
+                    "average_finish": None,
+                }
+                continue
+
+            driver_rows["round"] = pd.to_numeric(driver_rows["round"], errors="coerce")
+            driver_rows["points"] = pd.to_numeric(driver_rows["points"], errors="coerce").fillna(0.0)
+            positions = pd.to_numeric(driver_rows["position"], errors="coerce")
+            driver_rows["position_numeric"] = positions
+            driver_rows = driver_rows.sort_values("round")
+
+            drivers[driver_code] = {
+                "race_names": [schedule.get(int(r), f"Round {int(r)}") for r in driver_rows["round"].tolist()],
+                "rounds": [int(r) for r in driver_rows["round"].tolist()],
+                "points_by_round": driver_rows["points"].astype(float).round(2).tolist(),
+                "cumulative_points": driver_rows["points"].cumsum().astype(float).round(2).tolist(),
+                "finishing_positions": driver_rows["position_numeric"].astype(float).tolist(),
+                "total_points": round(float(driver_rows["points"].sum()), 2),
+                "average_finish": round(float(driver_rows["position_numeric"].mean()), 2)
+                if driver_rows["position_numeric"].notna().any()
+                else None,
+            }
+
+        interpretation = "Season comparison uses cumulative points and finishing positions across all rounds."
+        return {"rounds": rounds, "drivers": drivers, "interpretation": interpretation}

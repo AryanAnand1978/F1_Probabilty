@@ -15,7 +15,7 @@ export default function LandingPage() {
         <section className="card p-8 md:p-10 bg-gradient-to-br from-f1gray to-black">
           <h2 className="text-2xl font-bold">Academic Project Scope</h2>
           <p className="mt-3 max-w-3xl text-white/75">
-            Analyze race lap times, random variables, regression, distributions, and hypothesis tests using real session data.
+            Analyze race lap times, random variables, regression, distributions, and season-level comparisons using real session data.
           </p>
           <div className="mt-8 flex flex-wrap gap-4">
             <button

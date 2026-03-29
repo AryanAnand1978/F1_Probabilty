@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import traceback
 import uuid
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
@@ -23,6 +25,26 @@ app.add_middleware(
 loader = F1DataLoader(cache_dir="./cache")
 engine = AnalysisEngine(loader)
 results_store: dict[str, dict[str, Any]] = {}
+results_dir = Path("./cache/results")
+results_dir.mkdir(parents=True, exist_ok=True)
+
+
+def _result_path(job_id: str) -> Path:
+    return results_dir / f"{job_id}.json"
+
+
+def _persist_result(job_id: str, payload: dict[str, Any]) -> None:
+    _result_path(job_id).write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _load_persisted_result(job_id: str) -> dict[str, Any] | None:
+    path = _result_path(job_id)
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
 
 
 class AnalyzeRequest(BaseModel):
@@ -66,6 +88,7 @@ def get_session(year: int, race: str) -> dict[str, Any]:
 def analyze(payload: AnalyzeRequest) -> dict[str, str]:
     job_id = str(uuid.uuid4())
     results_store[job_id] = {"job_id": job_id, "status": "running"}
+    _persist_result(job_id, results_store[job_id])
 
     try:
         analysis_result = engine.run(
@@ -81,6 +104,7 @@ def analyze(payload: AnalyzeRequest) -> dict[str, str]:
             "status": "completed",
             "result": analysis_result,
         }
+        _persist_result(job_id, results_store[job_id])
     except Exception as exc:
         results_store[job_id] = {
             "job_id": job_id,
@@ -88,15 +112,17 @@ def analyze(payload: AnalyzeRequest) -> dict[str, str]:
             "error": str(exc),
             "traceback": traceback.format_exc(),
         }
+        _persist_result(job_id, results_store[job_id])
 
     return {"job_id": job_id, "status": results_store[job_id]["status"]}
 
 
 @app.get("/results/{job_id}")
 def get_results(job_id: str) -> dict[str, Any]:
-    result = results_store.get(job_id)
+    result = results_store.get(job_id) or _load_persisted_result(job_id)
     if not result:
         raise HTTPException(status_code=404, detail="Job not found")
+    results_store[job_id] = result
     return result
 
 
